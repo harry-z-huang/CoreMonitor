@@ -268,7 +268,7 @@ struct ProcessesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Picker("", selection: $ui.tab) { ForEach(ProcTab.allCases, id: \.self) { Text($0.rawValue) } }
+                Picker("", selection: $ui.tab.deferred) { ForEach(ProcTab.allCases, id: \.self) { Text($0.rawValue) } }
                     .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 420)
                 Spacer()
                 TextField("Search", text: $ui.filter).textFieldStyle(.roundedBorder).frame(width: 180)
@@ -463,7 +463,7 @@ struct ProcSummary: View {
     @ObservedObject var pm: ProcMonitor
     let tab: ProcTab
     private func stat(_ k: String, _ v: String, _ c: Color = .primary) -> some View {
-        GridRow { Text(k).foregroundStyle(.secondary); Text(v).monospacedDigit().foregroundStyle(c).gridColumnAlignment(.trailing) }
+        GridRow { Text(k).foregroundStyle(.secondary); Text(v).monospacedDigit().foregroundStyle(c).frame(minWidth: 100, alignment: .trailing).gridColumnAlignment(.trailing) }
     }
     private func sum(_ arrs: [[Double]]) -> [Double] {
         guard let f = arrs.first else { return Array(repeating: 0, count: Monitor.historyLen) }
@@ -561,7 +561,7 @@ struct RootView: View {
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Picker("", selection: $ui.page) { Text("Graphs").tag("Graphs"); Text("Processes").tag("Processes") }
+                Picker("", selection: $ui.page.deferred) { Text("Graphs").tag("Graphs"); Text("Processes").tag("Processes") }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
         }

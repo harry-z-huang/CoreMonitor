@@ -2,6 +2,27 @@ import SwiftUI
 import IOKit
 import Darwin
 
+extension Binding {
+    /// macOS segmented Pickers write their selection while SwiftUI is still updating views, which logs
+    /// "Publishing changes from within view updates is not allowed". Applying the write on the next
+    /// main-loop turn avoids it; the one-frame delay isn't visible.
+    var deferred: Binding<Value> {
+        Binding(get: { wrappedValue }, set: { v in DispatchQueue.main.async { self.wrappedValue = v } })
+    }
+}
+
+/// A label that always takes the width of `template` (its widest possible value), so numbers changing
+/// between 1, 2 and 3 digits don't shift the text around them. Digits are monospaced by the caller's font.
+struct FixedText: View {
+    let text: String
+    let template: String
+    var alignment: Alignment = .trailing
+    init(_ text: String, _ template: String, alignment: Alignment = .trailing) { self.text = text; self.template = template; self.alignment = alignment }
+    var body: some View {
+        Text(template).hidden().overlay(alignment: alignment) { Text(text).lineLimit(1).fixedSize() }
+    }
+}
+
 // MARK: - Sampling
 final class Monitor: ObservableObject {
     static let historyLen = 60
@@ -279,7 +300,7 @@ struct Graph: View {
             HStack {
                 Text(title).font(.caption.bold())
                 Spacer()
-                Text(valueText ?? "\(Int((data.last ?? 0) * 100))%").font(.caption.monospacedDigit())
+                FixedText(valueText ?? "\(Int((data.last ?? 0) * 100))%", valueText == nil ? "100%" : "000.00 GB").font(.caption.monospacedDigit())
             }
             ChartCanvas(layers: [ChartLayer(data: data, color: color)])
             .frame(height: 80)
@@ -301,8 +322,8 @@ struct StackedGraph: View {
             HStack {
                 Text(title).font(.caption.bold())
                 Spacer()
-                Text("\(topLabel) \(String(format: "%.1f", top.last ?? 0)) GB").foregroundStyle(topColor)
-                Text("\(bottomLabel) \(String(format: "%.1f", bottom.last ?? 0)) GB").foregroundStyle(bottomColor)
+                FixedText("\(topLabel) \(String(format: "%.1f", top.last ?? 0)) GB", "\(topLabel) 000.0 GB").foregroundStyle(topColor)
+                FixedText("\(bottomLabel) \(String(format: "%.1f", bottom.last ?? 0)) GB", "\(bottomLabel) 000.0 GB").foregroundStyle(bottomColor)
             }.font(.caption.monospacedDigit())
             ChartCanvas(layers: [
                 // same look as the combined CPU graph: 35% bands with a solid line on each layer
@@ -332,8 +353,8 @@ struct RateGraph: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption.bold()).lineLimit(1)
             HStack(spacing: 8) {
-                Text("\(aLabel) \(fmtRate(a.last ?? 0))").foregroundStyle(aColor)
-                Text("\(bLabel) \(fmtRate(b.last ?? 0))").foregroundStyle(bColor)
+                FixedText("\(aLabel) \(fmtRate(a.last ?? 0))", "\(aLabel) 000.0 MB/s", alignment: .leading).foregroundStyle(aColor)
+                FixedText("\(bLabel) \(fmtRate(b.last ?? 0))", "\(bLabel) 000.0 MB/s", alignment: .leading).foregroundStyle(bColor)
             }.font(.caption2.monospacedDigit())
             ZStack(alignment: .topTrailing) {
                 ChartCanvas(layers: [ChartLayer(data: a, color: aColor, fill: nil), ChartLayer(data: b, color: bColor, fill: nil)], maxValue: peak, grid: false)
@@ -455,9 +476,13 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("CPU").font(.title2.bold())
-                Text("\(m.cpu.count) cores · \(m.pCores)P + \(m.eCores)E · avg \(Int(avg * 100))%" + (m.chipC.map { " · chip \(Int($0.rounded()))°C" } ?? "")).foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    Text("\(m.cpu.count) cores · \(m.pCores)P + \(m.eCores)E · ")
+                    FixedText("avg \(Int(avg * 100))%", "avg 100%", alignment: .leading)
+                    if let c = m.chipC { FixedText(" · chip \(Int(c.rounded()))°C", " · chip 100°C", alignment: .leading) }
+                }.foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
-                Picker("", selection: Binding(get: { m.cpuCombined }, set: { m.cpuCombined = $0 })) { Text("Per Core").tag(false); Text("Combined").tag(true) }
+                Picker("", selection: Binding(get: { m.cpuCombined }, set: { m.cpuCombined = $0 }).deferred) { Text("Per Core").tag(false); Text("Combined").tag(true) }
                     .pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
             }
             if m.cpuCombined {
@@ -465,8 +490,8 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("All cores").font(.caption.bold()); Spacer()
-                        Text("System \(Int(((m.cpuSys.last ?? 0) * 100).rounded()))%").foregroundStyle(.red)
-                        Text("User \(Int(((m.cpuUser.last ?? 0) * 100).rounded()))%").foregroundStyle(.blue)
+                        FixedText("System \(Int(((m.cpuSys.last ?? 0) * 100).rounded()))%", "System 100%").foregroundStyle(.red)
+                        FixedText("User \(Int(((m.cpuUser.last ?? 0) * 100).rounded()))%", "User 100%").foregroundStyle(.blue)
                     }.font(.caption.monospacedDigit())
                     MiniChart(series: [(m.cpuSys, .red), (m.cpuUser, .blue)], stacked: true, maxValue: 1).frame(height: 120)
                 }
@@ -506,7 +531,10 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Memory").font(.title2.bold())
-                Text("\(Int(m.totalMemGB.rounded())) GB · \(gb(used)) used").foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    Text("\(Int(m.totalMemGB.rounded())) GB · ")
+                    FixedText("\(gb(used)) used", "000.0 GB used", alignment: .leading)
+                }.foregroundStyle(.secondary).monospacedDigit()
             }
             StackedGraph(title: "Used", bottom: m.memCPU, top: m.memGPU, total: m.totalMemGB,
                          bottomLabel: "CPU", topLabel: "GPU", bottomColor: .orange, topColor: .cyan, height: 200)
