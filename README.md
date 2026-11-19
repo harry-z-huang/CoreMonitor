@@ -5,6 +5,16 @@ A lightweight native macOS system monitor for Apple Silicon, written in SwiftUI 
 - **Graphs**: per-core or combined CPU (with chip temperature), GPU, memory (CPU vs GPU, stacked), drives and network interfaces (with friendly names / Wi-Fi SSID). Multi-select (⌘/⇧-click) and drag to reorder sections.
 - **Processes**: Activity Monitor-style CPU / Memory / Energy / Disk / Network views with app icons, per-network sent/received columns, and live summary graphs.
 
+## Screenshots
+
+**Graphs** (all sections selected)
+
+![Graphs page with all sections](screenshots/graphs-all.png)
+
+**Processes** (CPU tab)
+
+![Processes page, CPU tab](screenshots/processes-cpu.png)
+
 ## Build
 
 ```sh
