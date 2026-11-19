@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>CoreMonitor</string>
+<key>CFBundleIdentifier</key><string>local.coremonitor</string>
+<key>CFBundleName</key><string>Core Monitor</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>NSLocationUsageDescription</key><string>macOS requires Location access to show the name of the Wi-Fi network you are connected to.</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>macOS requires Location access to show the name of the Wi-Fi network you are connected to.</string>
+</dict></plist>
