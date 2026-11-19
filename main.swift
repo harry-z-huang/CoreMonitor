@@ -388,7 +388,8 @@ final class GraphUI: ObservableObject {
 }
 
 struct ContentView: View {
-    @ObservedObject var m: Monitor
+    @ObservedObject var feed: Feed
+    var m: Monitor { feed.m }
     @StateObject var ui = GraphUI()
     let cols = [GridItem(.adaptive(minimum: 160), spacing: 10)]
     let icons = ["CPU": "cpu", "GPU": "display", "Memory": "memorychip", "Drives": "internaldrive", "Network": "network"]
@@ -456,7 +457,7 @@ struct ContentView: View {
                 Text("CPU").font(.title2.bold())
                 Text("\(m.cpu.count) cores · \(m.pCores)P + \(m.eCores)E · avg \(Int(avg * 100))%" + (m.chipC.map { " · chip \(Int($0.rounded()))°C" } ?? "")).foregroundStyle(.secondary)
                 Spacer()
-                Picker("", selection: $m.cpuCombined) { Text("Per Core").tag(false); Text("Combined").tag(true) }
+                Picker("", selection: Binding(get: { m.cpuCombined }, set: { m.cpuCombined = $0 })) { Text("Per Core").tag(false); Text("Combined").tag(true) }
                     .pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
             }
             if m.cpuCombined {

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Darwin
 import IOKit
 import CoreWLAN
@@ -81,42 +82,41 @@ final class ProcMonitor: ObservableObject {
     /// Latest nettop snapshot: per-process lifetime totals, plus each open connection's bytes and interface.
     struct NetSnap { var procs: [Int32: (UInt64, UInt64)] = [:]; var conns: [String: (pid: Int32, iface: String, i: UInt64, o: UInt64)] = [:] }
     private var netLatest = NetSnap()
-    private var netProc: Process?
-    private func startNettop() {
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-        // No -P: nettop then lists each connection under its process, with the interface it uses.
-        p.arguments = ["-L", "0", "-s", "2", "-x", "-J", "interface,bytes_in,bytes_out"]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { [weak self] _ in DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self?.startNettop() } }
-        guard (try? p.run()) != nil else { return }
-        netProc = p
+    /// Network data comes only from one-shot `nettop -L 1` snapshots: any continuously streaming nettop
+    /// (`-L 0`) burns ~140% CPU, while one snapshot costs ~0.09 s of CPU (and ~5 s of wall time).
+    private func startNettop() { startConnPoller() }
+
+    /// Snapshots run back to back while the Processes page is visible (~5 s apart), and every
+    /// 15 s otherwise so the per-network totals keep accumulating.
+    private var connPollerStarted = false
+    private func startConnPoller() {
+        guard !connPollerStarted else { return }; connPollerStarted = true
         Thread.detachNewThread { [weak self] in
-            var snap = NetSnap(), buf = Data(), pid: Int32 = -1
-            let h = pipe.fileHandleForReading
-            while true {
-                let chunk = h.availableData; if chunk.isEmpty { return }
-                buf.append(chunk)
-                while let nl = buf.firstIndex(of: 10) {
-                    let line = String(decoding: buf[buf.startIndex..<nl], as: UTF8.self); buf.removeSubrange(buf.startIndex...nl)
-                    if line.hasPrefix(",") {   // header: previous block complete
-                        if !snap.procs.isEmpty, let self { self.netLock.lock(); self.netLatest = snap; self.netLock.unlock() }
-                        snap = NetSnap(); pid = -1; continue
+            while self != nil {
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
+                p.arguments = ["-L", "1", "-x", "-J", "interface,bytes_in,bytes_out"]
+                let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
+                if (try? p.run()) != nil {
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                    var conns: [String: (pid: Int32, iface: String, i: UInt64, o: UInt64)] = [:], pid: Int32 = -1
+                    var procs: [Int32: (UInt64, UInt64)] = [:]
+                    for line in String(decoding: data, as: UTF8.self).split(separator: "\n").dropFirst() {
+                        // columns: name, interface, bytes_in, bytes_out; process rows have an empty interface
+                        let f = line.split(separator: ",", omittingEmptySubsequences: false)
+                        guard f.count >= 4 else { continue }
+                        if f[1].isEmpty, let dot = f[0].lastIndex(of: "."), let p = Int32(f[0][f[0].index(after: dot)...]) {
+                            pid = p; procs[p] = (UInt64(f[2]) ?? 0, UInt64(f[3]) ?? 0)
+                        }
+                        else if !f[1].isEmpty, pid >= 0 {
+                            conns["\(pid)|\(f[0])|\(f[1])"] = (pid, String(f[1]), UInt64(f[2]) ?? 0, UInt64(f[3]) ?? 0)
+                        }
                     }
-                    // columns: name, interface, bytes_in, bytes_out
-                    let f = line.split(separator: ",", omittingEmptySubsequences: false)
-                    guard f.count >= 4 else { continue }
-                    let i = UInt64(f[2]) ?? 0, o = UInt64(f[3]) ?? 0
-                    if f[1].isEmpty, let dot = f[0].lastIndex(of: "."), let p = Int32(f[0][f[0].index(after: dot)...]) {
-                        pid = p; snap.procs[p] = (i, o)                       // process row
-                    } else if !f[1].isEmpty, pid >= 0 {
-                        let iface = String(f[1])                               // connection row
-                        snap.conns["\(pid)|\(f[0])|\(iface)"] = (pid, iface, i, o)
-                    }
+                    if let self { self.netLock.lock(); self.netLatest = NetSnap(procs: procs, conns: conns); self.netLock.unlock() }
                 }
+                Thread.sleep(forTimeInterval: self?.visible == true ? 0.5 : 15)
             }
         }
     }
-    deinit { netProc?.terminationHandler = nil; netProc?.terminate() }
     private func netSnap() -> NetSnap { netLock.lock(); defer { netLock.unlock() }; return netLatest }
 
     /// Interface → network group shown as a column ("Wi-Fi", "Ethernet", "VPN / Tunnel"). Loopback is local, so skipped.
@@ -259,7 +259,7 @@ private func num(_ v: Double, _ f: String = "%.1f") -> some View { Text(String(f
 private func txt(_ s: String) -> some View { Text(s).monospacedDigit().lineLimit(1) }
 
 struct ProcessesView: View {
-    let m: Monitor   // not observed here: only ProcSummary redraws on the 1s graph tick, not the big table
+    let feed: Feed   // not observed here: only ProcSummary redraws on the 1s graph tick, not the big table
     @ObservedObject var pm: ProcMonitor
     @StateObject var ui = ProcUI()
 
@@ -274,7 +274,7 @@ struct ProcessesView: View {
                 TextField("Search", text: $ui.filter).textFieldStyle(.roundedBorder).frame(width: 180)
             }
             if pm.rows.isEmpty { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) } else { table }
-            ProcSummary(m: m, pm: pm, tab: ui.tab).frame(height: 200)
+            ProcSummary(feed: feed, pm: pm, tab: ui.tab).frame(height: 200)
         }.padding()
 
     }
@@ -324,6 +324,32 @@ struct ProcCol {
     static let defaultSort: [ProcTab: String] = [.cpu: "cpu", .memory: "mem", .energy: "power", .disk: "bw", .network: "sent"]
 }
 
+/// Table cell that draws its own icon + text: no NSTextField, no Auto Layout. Refreshing ~40 visible rows
+/// of NSTextFields with constraints every 2 s was the bulk of the Processes page's CPU use.
+final class TextCell: NSView {
+    var text = "" { didSet { if text != oldValue { needsDisplay = true } } }
+    var icon: NSImage? { didSet { if icon !== oldValue { needsDisplay = true } } }
+    var hasIconSlot = false
+    var alignment: NSTextAlignment = .left
+    static let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+    override func draw(_ dirty: NSRect) {
+        var x: CGFloat = 2
+        if hasIconSlot {
+            icon?.draw(in: NSRect(x: x, y: (bounds.height - 16) / 2, width: 16, height: 16))
+            x += 22
+        }
+        let para = NSMutableParagraphStyle(); para.alignment = alignment; para.lineBreakMode = .byTruncatingTail
+        let selected = (superview as? NSTableRowView)?.isSelected == true && (superview as? NSTableRowView)?.isEmphasized == true
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.font, .paragraphStyle: para,
+                                                    .foregroundColor: selected ? NSColor.alternateSelectedControlTextColor : NSColor.labelColor]
+        let h = Self.font.ascender - Self.font.descender
+        (text as NSString).draw(with: NSRect(x: x, y: (bounds.height - h) / 2, width: bounds.width - x - 2, height: h + 2),
+                                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
+    }
+}
+
 /// NSTableView-backed table (like Activity Monitor): reuses cells, so tab switches and 2s refreshes are cheap.
 struct ProcTable: NSViewRepresentable {
     let rows: [ProcRow]
@@ -350,14 +376,15 @@ struct ProcTable: NSViewRepresentable {
         var sorted: [ProcRow] = []
         var raw: [ProcRow] = []
         var sortState: [ProcTab: (String, Bool)] = [:]   // per-tab column id + ascending
-        let mono = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-
+    
         var groups: [String] = []
+        var needsReload = true
         func update(rows: [ProcRow], tab: ProcTab, groups: [String]) {
             guard let tv else { return }
             raw = rows
             if tab != self.tab || groups != self.groups {
                 let tabChanged = tab != self.tab
+                needsReload = true
                 self.tab = tab; self.groups = groups
                 let widths = Dictionary(tv.tableColumns.map { ($0.identifier.rawValue, $0.width) }, uniquingKeysWith: { a, _ in a })
                 for c in tv.tableColumns { tv.removeTableColumn(c) }
@@ -378,41 +405,37 @@ struct ProcTable: NSViewRepresentable {
             let sel = tv.selectedRow >= 0 && tv.selectedRow < sorted.count ? sorted[tv.selectedRow].id : nil
             let st = sortState[tab] ?? (ProcCol.defaultSort[tab]!, false)
             if let c = cols[st.0] { sorted = raw.sorted { st.1 ? c.less($0, $1) : c.less($1, $0) } } else { sorted = raw }
-            tv.reloadData()
+            if needsReload { needsReload = false; tv.reloadData() }
+            else {
+                // Update the existing cells in place; rows outside the prepared area get configured when scrolled in.
+                if tv.numberOfRows != sorted.count { tv.noteNumberOfRowsChanged() }
+                let rows = tv.rows(in: tv.preparedContentRect)
+                for r in rows.location..<min(rows.location + rows.length, sorted.count) {
+                    for (ci, col) in tv.tableColumns.enumerated() {
+                        if let v = tv.view(atColumn: ci, row: r, makeIfNecessary: false) as? TextCell, let spec = cols[col.identifier.rawValue] {
+                            configure(v, spec, sorted[r])
+                        }
+                    }
+                }
+            }
             if let sel, let i = sorted.firstIndex(where: { $0.id == sel }) { tv.selectRowIndexes([i], byExtendingSelection: false) }
         }
         func tableView(_ tv: NSTableView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
             guard let tab, let d = tv.sortDescriptors.first, let k = d.key else { return }
-            sortState[tab] = (k, d.ascending); resort()
+            sortState[tab] = (k, d.ascending); needsReload = true; resort()
         }
         func numberOfRows(in tv: NSTableView) -> Int { sorted.count }
+        func configure(_ c: TextCell, _ spec: ProcCol, _ r: ProcRow) {
+            c.hasIconSlot = spec.id == "name"
+            c.alignment = spec.numeric ? .right : .left
+            c.icon = c.hasIconSlot ? r.icon : nil
+            c.text = spec.text(r)
+        }
         func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
             guard let col, let spec = cols[col.identifier.rawValue], row < sorted.count else { return nil }
-            let r = sorted[row]
-            if spec.id == "name" {
-                let cell = (tv.makeView(withIdentifier: col.identifier, owner: nil) as? NSTableCellView) ?? {
-                    let c = NSTableCellView(); c.identifier = col.identifier
-                    let iv = NSImageView(); iv.imageScaling = .scaleProportionallyDown
-                    let tf = NSTextField(labelWithString: ""); tf.lineBreakMode = .byTruncatingTail
-                    for v in [iv, tf] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; c.addSubview(v) }
-                    c.imageView = iv; c.textField = tf
-                    NSLayoutConstraint.activate([
-                        iv.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 2), iv.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-                        iv.widthAnchor.constraint(equalToConstant: 16), iv.heightAnchor.constraint(equalToConstant: 16),
-                        tf.leadingAnchor.constraint(equalTo: iv.trailingAnchor, constant: 6), tf.trailingAnchor.constraint(equalTo: c.trailingAnchor),
-                        tf.centerYAnchor.constraint(equalTo: c.centerYAnchor)])
-                    return c
-                }()
-                cell.imageView?.image = r.icon
-                cell.textField?.stringValue = r.name
-                return cell
-            }
-            let tf = (tv.makeView(withIdentifier: col.identifier, owner: nil) as? NSTextField) ?? {
-                let t = NSTextField(labelWithString: ""); t.identifier = col.identifier; t.lineBreakMode = .byTruncatingTail; t.font = mono; return t
-            }()
-            tf.alignment = spec.numeric ? .right : .left
-            tf.stringValue = spec.text(r)
-            return tf
+            let c = (tv.makeView(withIdentifier: col.identifier, owner: nil) as? TextCell) ?? {
+                let t = TextCell(); t.identifier = col.identifier; return t }()
+            configure(c, spec, sorted[row]); return c
         }
     }
 }
@@ -435,7 +458,8 @@ struct MiniChart: View {
 
 /// Activity Monitor-style strip under the table: stats on the left, a chart on the right.
 struct ProcSummary: View {
-    @ObservedObject var m: Monitor
+    @ObservedObject var feed: Feed
+    var m: Monitor { feed.m }
     @ObservedObject var pm: ProcMonitor
     let tab: ProcTab
     private func stat(_ k: String, _ v: String, _ c: Color = .primary) -> some View {
@@ -491,7 +515,7 @@ struct ProcSummary: View {
     }
     /// The matching graphs from the Graphs page (reused directly so the two stay identical).
     @ViewBuilder var chart: some View {
-        let g = ContentView(m: m)
+        let g = ContentView(feed: feed)
         switch tab {
         case .cpu: g.cpuSection
         // Just the stacked CPU/GPU graph, at the same height as the other cards (the readout on the left has the numbers).
@@ -506,15 +530,34 @@ struct ProcSummary: View {
 
 final class RootUI: ObservableObject { @Published var page = "Graphs" }
 
+/// Re-publishes Monitor's 1 s updates only while its page is visible, so the hidden page doesn't redraw.
+final class Feed: ObservableObject {
+    let m: Monitor
+    private(set) var active: Bool
+    private var sub: AnyCancellable?
+    init(_ m: Monitor, active: Bool = true) {
+        self.m = m; self.active = active
+        sub = m.objectWillChange.sink { [weak self] _ in if self?.active == true { self?.objectWillChange.send() } }
+    }
+    func setActive(_ a: Bool) { guard a != active else { return }; active = a; if a { objectWillChange.send() } }
+}
+
+/// Owns the long-lived models (created exactly once, unlike values built in a View's init).
+final class AppModel: ObservableObject {
+    let m = Monitor()
+    let pm = ProcMonitor()
+    lazy var graphsFeed = Feed(m, active: true)
+    lazy var procFeed = Feed(m, active: false)
+}
+
 /// Both pages stay alive and are just shown/hidden, so switching never rebuilds the process table or the graphs.
 struct RootView: View {
-    @StateObject var m = Monitor()
-    @StateObject var pm = ProcMonitor()
+    @StateObject var app = AppModel()
     @StateObject var ui = RootUI()
     var body: some View {
         ZStack {
-            ContentView(m: m).opacity(ui.page == "Graphs" ? 1 : 0).allowsHitTesting(ui.page == "Graphs")
-            ProcessesView(m: m, pm: pm).opacity(ui.page == "Processes" ? 1 : 0).allowsHitTesting(ui.page == "Processes")
+            ContentView(feed: app.graphsFeed).opacity(ui.page == "Graphs" ? 1 : 0).allowsHitTesting(ui.page == "Graphs")
+            ProcessesView(feed: app.procFeed, pm: app.pm).opacity(ui.page == "Processes" ? 1 : 0).allowsHitTesting(ui.page == "Processes")
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -522,7 +565,10 @@ struct RootView: View {
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
         }
-        .onChange(of: ui.page) { _, page in pm.setVisible(page == "Processes") }
+        .onChange(of: ui.page) { _, page in
+            app.graphsFeed.setActive(page == "Graphs"); app.procFeed.setActive(page == "Processes")
+            app.pm.setVisible(page == "Processes")
+        }
         .frame(minWidth: 900, minHeight: 760)
     }
 }
