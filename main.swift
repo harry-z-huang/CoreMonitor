@@ -305,8 +305,9 @@ struct StackedGraph: View {
                 Text("\(bottomLabel) \(String(format: "%.1f", bottom.last ?? 0)) GB").foregroundStyle(bottomColor)
             }.font(.caption.monospacedDigit())
             ChartCanvas(layers: [
-                ChartLayer(data: bottom, color: bottomColor, fill: 0.75, line: false),
-                ChartLayer(data: zip(bottom, top).map { $0 + $1 }, base: bottom, color: topColor, fill: 0.55)],
+                // same look as the combined CPU graph: 35% bands with a solid line on each layer
+                ChartLayer(data: bottom, color: bottomColor),
+                ChartLayer(data: zip(bottom, top).map { $0 + $1 }, base: bottom, color: topColor)],
                 maxValue: max(total, 0.001))
             .frame(height: height)
         }
